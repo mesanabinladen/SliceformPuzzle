@@ -1,0 +1,3 @@
+x Pyinstaller
+
+pyinstaller --onefile --noconsole --icon=sliceform_puzzle_icon.ico --name "SliceformPuzzleMaker" main.py  

@@ -2,3 +2,6 @@ slices_points.*
 *.jpg
 *.mtl
 *.obj
+*.svg
+
+.vscode/

@@ -10,6 +10,13 @@ SAVE_JSON = False
 DEBUG = True
 DEBUG_PLOT = False
 MAX_SLICE_DEPTH_CM = 0.3
+# Dimensioni A4 in pixel a 320ppi
+A4_W, A4_H = 2646, 3742  # dimensioni A4 a 320 PPI
+REQUESTED_PPI = 320  # pixel per inch per l'SVG
+
+# fattore di scala per ingrandire il modello durante il slicing. 
+# teoricamente un fattore di 10 genera un alpino alto 25 cm. Quindi i contour risulteranno espressi in cm, 
+SCALE_FACTOR = 10
 
 def slices_points_from_stl(stl_path,
                            n_slices=100,
@@ -50,7 +57,7 @@ def slices_points_from_stl(stl_path,
         mesh = mesh.dump(concatenate=True)
 
     # scala in cm (modifica la mesh in-place; ora z è in cm)
-    mesh.apply_scale(unit_to_cm[unit_in]*10)
+    mesh.apply_scale(unit_to_cm[unit_in] * SCALE_FACTOR)
 
  # se l'asse "up" del modello non è Z, ruotiamo per allinearlo a +Z
     def _axis_vector(axis):
@@ -133,7 +140,139 @@ def slices_points_from_stl(stl_path,
         all_slices.append(contours)
 
     return all_slices
+
+def bounding_box(contour, border=0):
+    xs = contour[:,0]
+    ys = contour[:,1]
+    return xs.min()-border, ys.min()-border, xs.max()+border, ys.max()+border
+
+def translate(contour, dx, dy):
+    return contour + np.array([dx, dy])
+
+def contour_to_svg_path(contour):
+    pts = " ".join(f"{int(x)},{int(y)}" for x,y in contour)
+    return f"<polygon points=\"{pts}\" fill=\"none\" stroke=\"red\"/>"
+
+def pack_sorted_contours(contours_sorted, border=25):
+
+    placements = []
+    x_cursor, y_cursor = 0, 0
+    row_height = 0
+
+    used_sorted_indices = []
+
+    for i, (sl_index, contour) in enumerate(contours_sorted):
+        if i in used_sorted_indices:
+            continue
+
+        xmin, ymin, xmax, ymax = bounding_box(contour, border)
+        w, h = xmax-xmin, ymax-ymin
+
+        if x_cursor + w > A4_W:
+             # prima di andare a capo, prova a riempire con piccoli, se li trovo nel fondo dell'array
+            space_left = A4_W - x_cursor
+            j = len(contours_sorted) - 1
+            while j>=0:
+                if j not in used_sorted_indices:
+                    sc = contours_sorted[j][1]
+                    sxmin, symin, sxmax, symax = bounding_box(sc, border)
+                    sw, sh = sxmax-sxmin, symax-symin
+                    if sw <= space_left and sh <= row_height:
+                        placements.append((sl_index, j, sc, x_cursor - sxmin, y_cursor - symin))
+                        x_cursor += sw
+                        space_left = A4_W - x_cursor
+                        used_sorted_indices.append(j) # rimuovi il piccolo usato
+                j -= 1
+
+            # ora vai a capo
+            x_cursor = 0
+            y_cursor += row_height
+            row_height = 0
+
+        if y_cursor + h > A4_H:
+             # prima di cambiare foglio, prova a riempire con piccoli
+            space_down = A4_H - y_cursor
+            space_left = A4_W - x_cursor
+
+            j = len(contours_sorted) - 1
+            while j>=0:
+                if j not in used_sorted_indices:
+                    sc = contours_sorted[j][1]
+                    sxmin, symin, sxmax, symax = bounding_box(sc , border)
+                    sw, sh = sxmax-sxmin, symax-symin
+                    if sh <= space_down and sw <= space_left:
+                        placements.append((sl_index, j, sc, x_cursor - sxmin, y_cursor - symin))
+                        x_cursor += sw
+                        space_left = A4_W - x_cursor
+                        used_sorted_indices.append(j) # rimuovi il piccolo usato
+                j -= 1
+            break
+
+        placements.append((sl_index, i, contour, x_cursor - xmin, y_cursor - ymin))
+        used_sorted_indices.append(i)
+        x_cursor += w
+        row_height = max(row_height, h)
     
+    return placements, used_sorted_indices
+
+def bounding_box_area(contour):
+    xmin, ymin = contour[:,0].min(), contour[:,1].min()
+    xmax, ymax = contour[:,0].max(), contour[:,1].max()
+    return (xmax - xmin) * (ymax - ymin)
+
+def make_svgs(contours):
+    # ordina per area decrescente
+  # ordina dal più grande al più piccolo
+    contours_sorted = sorted(
+        contours,
+        key=lambda item: bounding_box_area(item[1]),
+        reverse=True
+    )
+
+    svgs = []
+    remaining = contours_sorted[:]
+
+    while remaining:
+        # prova a piazzare quanti più contorni possibili
+        placements, used_indices = pack_sorted_contours(remaining)
+
+        # togli i piazzati dai rimanenti
+        remaining = [c for j,c in enumerate(remaining) if j not in used_indices]
+
+        # costruisci SVG per questo foglio
+        svg_parts = [
+            f"<svg xmlns='http://www.w3.org/2000/svg' width='{A4_W}' height='{A4_H}' viewBox='0 0 {A4_W} {A4_H}'>",
+            f"<rect x='0' y='0' width='{A4_W}' height='{A4_H}' fill='none' stroke='red'/>"
+        ]
+
+        for sl_idx, idx, contour, dx, dy in placements:
+            c = translate(contour, dx, dy)
+            svg_parts.append(contour_to_svg_path(c))
+
+            # calcolo centro del bounding box del pezzo
+            xmin, ymin, xmax, ymax = bounding_box(c)
+            cx = (xmin + xmax) / 2
+            cy = (ymin + ymax) / 2
+
+            # scrivo il numero in giallo
+            svg_parts.append(
+                f"<text x='{cx}' y='{cy}' fill='yellow' font-size='60' text-anchor='middle' dominant-baseline='middle'>"
+                f"{sl_idx}-{idx}</text>"
+            )
+        svg_parts.append("</svg>")
+        svgs.append("\n".join(svg_parts))
+
+    for i, svg in enumerate(svgs, start=1):
+        with open(f"output_page_{i}.svg", "w") as f:
+            f.write(svg)
+
+
+def contour_to_pixels(contour_cm):
+    cm_to_inch = 1.0 / 2.54
+    pixels_per_cm = REQUESTED_PPI * cm_to_inch
+    contour_px = [(x*pixels_per_cm, y*pixels_per_cm) for (x,y) in contour_cm]
+    return contour_px
+  
 if __name__ == "__main__":
     model = Path("Alpino.mtl")
 
@@ -164,6 +303,14 @@ if __name__ == "__main__":
     for i, sl in enumerate(slices):
         if len(sl) > 2:
             slices[i] = []
+
+    # accumulo tutti i contour in un'unica lista per generare l'SVG. Siccome devo esprimerli in pixel, converto i cm in pixel
+    all_contours = []
+    for sl_index, sl in enumerate(slices):
+        for contour in sl:
+            all_contours.append((sl_index, np.array(contour_to_pixels(contour))))
+            
+    make_svgs(all_contours)
 
     fig = plt.figure()
     if DEBUG_PLOT:

@@ -1,3 +1,9 @@
 x Pyinstaller
 
+on Windows 
+
 pyinstaller --onefile --noconsole --icon=sliceform_puzzle_icon.ico --name "SliceformPuzzleMaker" main.py  
+
+on MAC
+
+pyinstaller --windowed --icon=sliceform_puzzle_icon.icns --name "SliceformPuzzleMaker" main.py

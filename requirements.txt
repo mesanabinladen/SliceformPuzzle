@@ -1,0 +1,4 @@
+numpy==2.3.5
+trimesh==4.10.1
+matplotlib==3.10.8
+pyinstaller==6.16.0

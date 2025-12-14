@@ -1,3 +1,3 @@
-alcuni tagli vengono scartati dal loop (tipo l'8, vedere come mai)
-fare in modo che i contours contengano anche il riferimento al loro SLICE, in quanto nello stesso slice possono esserci più contours
+icona!
 come agganciamo le gambe alla lisca centrale? bisogna fare una lisca che riesca a intercettare tutte le gambe
+puntare alla directory dell'exe tramite il metodo che uso in PuzzleMaker.exe

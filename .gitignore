@@ -3,5 +3,6 @@ slices_points.*
 *.mtl
 *.obj
 *.svg
+*.stl
 
 .vscode/

@@ -9,17 +9,18 @@ SAVE_NPZ = False
 SAVE_JSON = False
 DEBUG = True
 DEBUG_PLOT = False
+MAKE_SVG = True
 MAX_SLICE_DEPTH_CM = 0.3
+MINIMUM_CONTOUR_SIZE = 1 # cm, lato minimo del bounding box
 # Dimensioni A4 in pixel a 320ppi
 A4_W, A4_H = 2646, 3742  # dimensioni A4 a 320 PPI
 REQUESTED_PPI = 320  # pixel per inch per l'SVG
 
 # fattore di scala per ingrandire il modello durante il slicing. 
 # teoricamente un fattore di 10 genera un alpino alto 25 cm. Quindi i contour risulteranno espressi in cm, 
-SCALE_FACTOR = 10
+SCALE_FACTOR = 0.5 # per stl 0.05 (modello alto circa 400mm), per .obj 10
 
 def slices_points_from_stl(stl_path,
-                           n_slices=100,
                            spacing_cm=MAX_SLICE_DEPTH_CM*2,
                            unit_in='cm',
                            up_axis='Z'):
@@ -29,7 +30,6 @@ def slices_points_from_stl(stl_path,
 
     Params:
       stl_path: percorso file .stl
-      n_slices: numero di piani da campionare
       spacing_cm: distanza tra piani (cm)
       unit_in: unità in cui i vertici sono interpretati ('m','cm','mm') -- converte sempre in cm internamente
     """
@@ -90,6 +90,9 @@ def slices_points_from_stl(stl_path,
             mesh.apply_transform(rot)
 
     z_min = mesh.bounds[0][2]
+
+    n_slices = int(np.ceil((mesh.bounds[1][2] - z_min) / spacing_cm))
+
     # generiamo n_slices piani partendo da z_min con step spacing_cm
     # attenzione: se lo spazio totale > n_slices*spacing allora verranno solo i primi n_slices piani
     z_positions = [z_min + i * spacing_cm for i in range(n_slices)]
@@ -130,12 +133,12 @@ def slices_points_from_stl(stl_path,
                     pts = [tuple(map(float, v[idx])) for idx in pts_idx]
                     if pts and pts[0] != pts[-1]:
                         pts.append(pts[0])
-                    contours.append(pts)
+                    contours.append(np.array(pts))
                 except Exception:
                     continue
             # Se non siamo riusciti a ricavare per-entità, salva tutti i vertici come unico contour
             if not contours:
-                contours.append([tuple(pt) for pt in v.tolist()])
+                contours.append(np.array([tuple(pt) for pt in v.tolist()]))
        
         all_slices.append(contours)
 
@@ -145,6 +148,10 @@ def bounding_box(contour, border=0):
     xs = contour[:,0]
     ys = contour[:,1]
     return xs.min()-border, ys.min()-border, xs.max()+border, ys.max()+border
+
+def bounding_box_size(contour):
+    x_min, y_min, x_max, y_max = bounding_box(contour)
+    return (x_max - x_min, y_max - y_min)
 
 def translate(contour, dx, dy):
     return contour + np.array([dx, dy])
@@ -158,37 +165,38 @@ def pack_sorted_contours(contours_sorted, border=25):
     placements = []
     x_cursor, y_cursor = 0, 0
     row_height = 0
-
-    used_sorted_indices = []
-
-    for i, (sl_index, contour) in enumerate(contours_sorted):
-        if i in used_sorted_indices:
-            continue
-
+    
+    i = 0
+    while i < len(contours_sorted):
+        contour = contours_sorted[i][1]   # leggi senza toccare la lista
         xmin, ymin, xmax, ymax = bounding_box(contour, border)
         w, h = xmax-xmin, ymax-ymin
 
         if x_cursor + w > A4_W:
              # prima di andare a capo, prova a riempire con piccoli, se li trovo nel fondo dell'array
             space_left = A4_W - x_cursor
-            j = len(contours_sorted) - 1
+            j = len(contours_sorted) - 1 
             while j>=0:
-                if j not in used_sorted_indices:
-                    sc = contours_sorted[j][1]
-                    sxmin, symin, sxmax, symax = bounding_box(sc, border)
-                    sw, sh = sxmax-sxmin, symax-symin
-                    if sw <= space_left and sh <= row_height:
-                        placements.append((sl_index, j, sc, x_cursor - sxmin, y_cursor - symin))
-                        x_cursor += sw
-                        space_left = A4_W - x_cursor
-                        used_sorted_indices.append(j) # rimuovi il piccolo usato
+                sc = contours_sorted[j][1]
+                sxmin, symin, sxmax, symax = bounding_box(sc, border)
+                sw, sh = sxmax-sxmin, symax-symin
+                if sw <= space_left and sh <= row_height:
+                    sl_index = contours_sorted[j][0]
+                    placements.append((sl_index, sc, x_cursor - sxmin, y_cursor - symin))
+                    contours_sorted.pop(j)  # rimuovi il contorno usato
+                    j -= 1
+                    
+                    x_cursor += sw
+                    space_left = A4_W - x_cursor
+                else:
+                    break # break del mini ciclo per i contorni piccoli
                 j -= 1
 
             # ora vai a capo
             x_cursor = 0
             y_cursor += row_height
             row_height = 0
-
+        
         if y_cursor + h > A4_H:
              # prima di cambiare foglio, prova a riempire con piccoli
             space_down = A4_H - y_cursor
@@ -196,24 +204,29 @@ def pack_sorted_contours(contours_sorted, border=25):
 
             j = len(contours_sorted) - 1
             while j>=0:
-                if j not in used_sorted_indices:
-                    sc = contours_sorted[j][1]
-                    sxmin, symin, sxmax, symax = bounding_box(sc , border)
-                    sw, sh = sxmax-sxmin, symax-symin
-                    if sh <= space_down and sw <= space_left:
-                        placements.append((sl_index, j, sc, x_cursor - sxmin, y_cursor - symin))
-                        x_cursor += sw
-                        space_left = A4_W - x_cursor
-                        used_sorted_indices.append(j) # rimuovi il piccolo usato
-                j -= 1
-            break
+                sc = contours_sorted[j][1]
+                sxmin, symin, sxmax, symax = bounding_box(sc , border)
+                sw, sh = sxmax-sxmin, symax-symin
+                if sh <= space_down and sw <= space_left:
+                    sl_index = contours_sorted[j][0]
+                    placements.append((sl_index, sc, x_cursor - sxmin, y_cursor - symin))
+                    contours_sorted.pop(j)  # rimuovi il contorno usato
+                    j -= 1
 
-        placements.append((sl_index, i, contour, x_cursor - xmin, y_cursor - ymin))
-        used_sorted_indices.append(i)
+                    x_cursor += sw
+                    space_left = A4_W - x_cursor
+                else:
+                    break # break del mini ciclo per i contorni piccoli
+                j -= 1
+            break # fine del packing per questo foglio
+        
+        sl_index = contours_sorted[i][0]
+        placements.append((sl_index, contour, x_cursor - xmin, y_cursor - ymin))
+        contours_sorted.pop(i)  # rimuovi il contorno usato
         x_cursor += w
         row_height = max(row_height, h)
     
-    return placements, used_sorted_indices
+    return placements
 
 def bounding_box_area(contour):
     xmin, ymin = contour[:,0].min(), contour[:,1].min()
@@ -221,8 +234,7 @@ def bounding_box_area(contour):
     return (xmax - xmin) * (ymax - ymin)
 
 def make_svgs(contours):
-    # ordina per area decrescente
-  # ordina dal più grande al più piccolo
+    # ordina dal più grande al più piccolo
     contours_sorted = sorted(
         contours,
         key=lambda item: bounding_box_area(item[1]),
@@ -230,14 +242,10 @@ def make_svgs(contours):
     )
 
     svgs = []
-    remaining = contours_sorted[:]
-
-    while remaining:
+    
+    while contours_sorted: # finchè contours sorted contiene qualcosa
         # prova a piazzare quanti più contorni possibili
-        placements, used_indices = pack_sorted_contours(remaining)
-
-        # togli i piazzati dai rimanenti
-        remaining = [c for j,c in enumerate(remaining) if j not in used_indices]
+        placements = pack_sorted_contours(contours_sorted, border=25)
 
         # costruisci SVG per questo foglio
         svg_parts = [
@@ -245,7 +253,7 @@ def make_svgs(contours):
             f"<rect x='0' y='0' width='{A4_W}' height='{A4_H}' fill='none' stroke='red'/>"
         ]
 
-        for sl_idx, idx, contour, dx, dy in placements:
+        for tag, contour, dx, dy in placements:
             c = translate(contour, dx, dy)
             svg_parts.append(contour_to_svg_path(c))
 
@@ -257,7 +265,7 @@ def make_svgs(contours):
             # scrivo il numero in giallo
             svg_parts.append(
                 f"<text x='{cx}' y='{cy}' fill='yellow' font-size='60' text-anchor='middle' dominant-baseline='middle'>"
-                f"{sl_idx}-{idx}</text>"
+                f"{tag}</text>"
             )
         svg_parts.append("</svg>")
         svgs.append("\n".join(svg_parts))
@@ -274,10 +282,15 @@ def contour_to_pixels(contour_cm):
     return contour_px
   
 if __name__ == "__main__":
-    model = Path("Alpino.mtl")
+    # per prima cosa cancello tutti i file SVG esistenti dalla directory di lavoro
+    existing_svgs = list(Path('.').glob('output_page_*.svg'))
+    for svg_file in existing_svgs:
+        svg_file.unlink()
+    
+    model = Path("Alpino.stl")
 
     spacing_cm = MAX_SLICE_DEPTH_CM * 2  # distanza tra slice in cm
-    slices = slices_points_from_stl(str(model), n_slices=150, spacing_cm=spacing_cm, unit_in='cm', up_axis='Y')
+    slices = slices_points_from_stl(str(model), spacing_cm=spacing_cm, unit_in='mm', up_axis='Z')
     # salva come npz compatto (opzionale) — forziamo object dtype per salvare liste annidate non omogenee
     
     if SAVE_NPZ:
@@ -299,23 +312,28 @@ if __name__ == "__main__":
         for i, sl in enumerate(slices):
             print(f" Slice {i}: {len(sl)} contour")  
 
-    # cancello i contour dalle  slice con piu di 2 contour 
     for i, sl in enumerate(slices):
         if len(sl) > 2:
             slices[i] = []
+            continue
+        # ricostruisci la lista filtrando i troppo piccoli
+        slices[i] = [
+            contour for contour in sl
+            if not any(dim < MINIMUM_CONTOUR_SIZE for dim in bounding_box_size(contour))
+        ]
 
-    # accumulo tutti i contour in un'unica lista per generare l'SVG. Siccome devo esprimerli in pixel, converto i cm in pixel
-    all_contours = []
-    for sl_index, sl in enumerate(slices):
-        for contour in sl:
-            all_contours.append((sl_index, np.array(contour_to_pixels(contour))))
-            
-    make_svgs(all_contours)
+    if MAKE_SVG:
+        # accumulo tutti i contour in un'unica lista per generare l'SVG. Siccome devo esprimerli in pixel, converto i cm in pixel
+        all_contours = []
+        for sl_index, sl in enumerate(slices):
+            for contour_index, contour in enumerate(sl):
+                all_contours.append((f"{sl_index}-{contour_index}", np.array(contour_to_pixels(contour)))) 
+        make_svgs(all_contours)
 
     fig = plt.figure()
     if DEBUG_PLOT:
-        # faccio versione matplotlib 3d per verificare i risultati
-        ax_points = fig.add_subplot(projection='3d')
+        # faccio versione matplotlib 3d per verificare i risultati dello slicing puro
+        ax_points = fig.add_subplot(1,2,1, projection='3d')
         # plot punti sul subplot sinistro
         for slice_idx, sl in enumerate(slices):
             z = slice_idx * spacing_cm  
@@ -329,8 +347,9 @@ if __name__ == "__main__":
         ax_points.set_ylabel('Y (cm)')
         ax_points.set_zlabel('Z (cm)')
         print("Visualizzazione punti completata.")
-
-    ax_extrude = fig.add_subplot(projection='3d')
+        ax_extrude = fig.add_subplot(1,2,2, projection='3d')
+    else:
+        ax_extrude = fig.add_subplot(projection='3d')
 
     # subplot destro: estrusioni
     thickness_cm = min(MAX_SLICE_DEPTH_CM, spacing_cm)
@@ -339,10 +358,10 @@ if __name__ == "__main__":
         z_bottom = slice_idx * spacing_cm
         z_top = z_bottom + thickness_cm
         for contour in sl:
-            if not contour or len(contour) < 3:
+            if contour is None or contour.shape[0] < 3:
                 continue
             # rimuovi eventuale punto finale uguale al primo
-            if contour[0] == contour[-1]:
+            if np.array_equal(contour[0], contour[-1]):
                 base_pts = contour[:-1]
             else:
                 base_pts = contour

@@ -1,4 +1,5 @@
-numpy==2.3.5
+numpy==1.24.2
+shapely==2.1.2
 trimesh==4.10.1
 matplotlib==3.10.8
 pyinstaller==6.16.0

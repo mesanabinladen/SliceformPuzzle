@@ -5,7 +5,7 @@ import json
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection 
 import math
-from shapely.geometry import Polygon, LineString, box
+from shapely.geometry import MultiPoint, Polygon, LineString, box
 from shapely.ops import unary_union
 
 # CONSTANTS
@@ -17,7 +17,7 @@ SAVE_JSON = False
 DEBUG = True
 DEBUG_PLOT = False
 MAKE_SVG = True
-ADD_SPINE_TO_PLOT = True
+ADD_SPINE_TO_PLOT = False
 ADD_SLICES_TO_PLOT = False
 MINIMUM_CONTOUR_SIZE = 1 # cm, minimum side of the bounding box
 
@@ -203,7 +203,6 @@ def slices_points_from_stl(stl_path,
         # to_planar returns (path2d, transform). Polygons are shapely polygons.
         path2d, _ = section.to_planar()
         contours = []
-        # path2d.polygons_full -> list of shapely polygons, each polygon has exterior.coords
     
         v = np.array(getattr(path2d, "vertices", [])) if hasattr(path2d, "vertices") else np.array([])
         if v.size:
@@ -376,8 +375,8 @@ def contour_to_pixels(contour_cm):
     contour_px = [(x*pixels_per_cm, y*pixels_per_cm) for (x,y) in contour_cm]
     return contour_px
 
-def add_contour_to_plot(contour, z_bottom, z_top, face_color='cyan'):
-    global slices_plot
+def add_contour_to_plot(contour, z_bottom, z_top, face_color="cyan"):
+    global slices_plot 
 
     # remove any final point equal to the first
     if np.array_equal(contour[0], contour[-1]):
@@ -386,6 +385,9 @@ def add_contour_to_plot(contour, z_bottom, z_top, face_color='cyan'):
         base_pts = contour
     verts_bottom = [(float(pt[0]), float(pt[1]), z_bottom) for pt in base_pts]
     verts_top = [(float(pt[0]), float(pt[1]), z_top) for pt in base_pts]
+
+    # appendo tutte le tuple (z,x) alla lista del profilo della spina, prendendoli da verts_bottom e verts_top a patto che y sia >=0
+
     n = len(base_pts)
     faces = []
     for i in range(n):
@@ -400,7 +402,6 @@ def add_contour_to_plot(contour, z_bottom, z_top, face_color='cyan'):
     faces.append(list(reversed(verts_top)))
     poly3d = Poly3DCollection(faces, alpha=0.5, facecolors=face_color, edgecolors='r')
     slices_plot.add_collection3d(poly3d)
-
 
 def clip_polygon_x_shapely(geom: Polygon, keep_pct: float = 0.50, anchor: str = 'left') -> Polygon:
     """
@@ -452,9 +453,33 @@ def clip_polygon_x_shapely(geom: Polygon, keep_pct: float = 0.50, anchor: str = 
     # Intersezione
     return geom.intersection(clipper)
 
+def add_face_to_spine_contour(line_bottom, z_bottom, z_top):
+    global full_spine_face_zx
+
+    tmp_contour = []
+
+    # order line_bottom points by increasing x
+    line_bottom = sorted(line_bottom, key=lambda pt: pt[0])
+
+    # remove duplicates in x (keep first occurrence)
+    unique_line_bottom = []
+    for x, y in line_bottom:
+        if x not in [pt[0] for pt in unique_line_bottom]:
+            unique_line_bottom.append((x, y))
+    line_bottom = unique_line_bottom
+
+    # add Z coordinate to close the loop, in clockwise order
+    for x, y in line_bottom:
+        tmp_contour.append( (z_bottom, x) )  # (z,x)
+    for x, y in reversed(line_bottom):
+        tmp_contour.append( (z_top, x) )     # (z,x) 
+
+    tmp_contour.append(tmp_contour[0])  # close the loop
+
+    full_spine_face_zx.append(tmp_contour)
 
 def compute_spine_intersections(slices, spine):
-    
+
     spacing_cm = SLICE_HEIGHT_CM + AIR_GAP_CM
 
     spine_poly = Polygon(spine)
@@ -525,9 +550,15 @@ def compute_spine_intersections(slices, spine):
                     
                     sl_contours[ctr_idx] = np.array([(x, y) for x, y in cutted_slice.exterior.coords])
 
+                    z_bottom = i * spacing_cm
+                    z_top = z_bottom + SLICE_HEIGHT_CM
+                    
+                    # create a contour on the spine profile, only if y> (SLICE_HEIGHT_CM/2 - Eps) and y <  (SLICE_HEIGHT_CM/2 + Eps) 
+                    line_bottom = [(x, y) for x, y in cutted_poly.exterior.coords if y <= (SLICE_HEIGHT_CM / 2 + 1e-3) and y >= (SLICE_HEIGHT_CM / 2 - 1e-3)]
+
+                    add_face_to_spine_contour(line_bottom, z_bottom, z_top)
+                    
                     if ADD_SPINE_TO_PLOT:
-                        z_bottom = i * spacing_cm
-                        z_top = z_bottom + SLICE_HEIGHT_CM
                         add_contour_to_plot(cutted_bottom, z_bottom, z_top, face_color='green')
                     
                     ctr_idx += 1
@@ -571,6 +602,11 @@ def compute_spine_intersections(slices, spine):
                         z_top = (i + 1) * spacing_cm
                         contours_extruded.append([z_bottom, z_top, np.array([(x, y) for x, y in poly.exterior.coords])])
 
+                        # create a contour on the spine profile, only if y> (SLICE_HEIGHT_CM/2 - Eps) and y <  (SLICE_HEIGHT_CM/2 + Eps) 
+                        line_bottom = [(x, y) for x, y in poly.exterior.coords if y <= (SLICE_HEIGHT_CM / 2 + 1e-3) and y >= (SLICE_HEIGHT_CM / 2 - 1e-3)]
+
+                        add_face_to_spine_contour(line_bottom, z_bottom, z_top)
+                        
         if ADD_SPINE_TO_PLOT:
             for z_bottom, z_top, extrusion in contours_extruded:
                 add_contour_to_plot(extrusion, z_bottom, z_top, face_color='orange')
@@ -656,8 +692,28 @@ if __name__ == "__main__":
     slices_plot.set_zlabel('Z (cm)')
 
     # compute intersections between spine and each slice
-    compute_spine_intersections(slices, spine)
 
+    full_spine_face_zx = [] # lista di punti sul piano zx da cui ricavare il profilo della spina
+
+    compute_spine_intersections(slices, spine)
+    
+    merged = unary_union([Polygon(face) for face in full_spine_face_zx])
+    if merged.geom_type == "Polygon":
+        merged_faces = [merged]
+    elif merged.geom_type == "MultiPolygon":    
+        merged_faces = list(merged.geoms)
+    else:
+        merged_faces = []
+
+    merged_contour = [(x, z) for x, z in merged.exterior.coords] # questo è un contour!
+
+    if ADD_SPINE_TO_PLOT:
+        for face in full_spine_face_zx:
+            zs = [pt[0] for pt in face]
+            xs = [pt[1] for pt in face]
+            ys = [0.0] * len(face)  # spine lies on Y=0
+            slices_plot.plot(xs, ys, zs, marker='o', linestyle='-', color='blue', markersize=2)
+    
     if SAVE_NPZ:
         slices_arr = np.asarray(slices, dtype=object)
         np.savez_compressed("slices_points.npz", slices=slices_arr)
@@ -678,6 +734,8 @@ if __name__ == "__main__":
             sl = sl[:-2]
             for contour_index, contour in enumerate(sl):
                 all_contours.append((f"{sl_index}-{contour_index}", np.array(contour_to_pixels(contour)))) 
+        
+        all_contours.append(("spine", np.array(contour_to_pixels(merged_contour))))
         
         make_svgs(all_contours)
    

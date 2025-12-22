@@ -1,5 +1,4 @@
 
-adesso la lisca va più o meno bene ma va deciso come ridurla per consentire l'aggancio: io la farei al 50% dal centro, in X, per ogni contour (se centro contour > 0 rimuovo la parte X+ altrimenti la parte X-) in modo che i pezzi si montino dall'esterno
 
 icona!
 puntare alla directory dell'exe tramite il metodo che uso in PuzzleMaker.exe

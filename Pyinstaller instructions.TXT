@@ -1,9 +1,12 @@
-x Pyinstaller
+Pyinstaller instructions
+
+Move on the project folder and execute the following:
 
 on Windows 
 
-pyinstaller --onefile --noconsole --icon=sliceform_puzzle_icon.ico --name "SliceformPuzzleMaker" main.py  
+pyinstaller --onefile --noconsole --name "SliceformMaker" main.py  
 
 on MAC
 
-pyinstaller --windowed --icon=sliceform_puzzle_icon.icns --name "SliceformPuzzleMaker" main.py
+pyinstaller --windowed --name "SliceformMaker" main.py
+

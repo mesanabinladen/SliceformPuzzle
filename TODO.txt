@@ -1,4 +1,0 @@
-
-
-icona!
-puntare alla directory dell'exe tramite il metodo che uso in PuzzleMaker.exe

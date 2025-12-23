@@ -47,40 +47,32 @@ pip install -r requirements.txt
 
 ### Basic Usage
 
-1. Place your 3D model file (e.g., `test model.stl`) in the project directory
-2. Run the script:
-```bash
-python main.py
-```
-3. SVG files will be generated as `output_page_1.svg`, `output_page_2.svg`, etc.
+1. Start the app and preset your desired slice height and air gap
+2. Select your .STL file with the "Open STL..." button
+3. wait
+4. SVG files will be generated as `output_page_1.svg`, `output_page_2.svg`, etc.
 
 ### Configuration
 
 Edit the configuration constants in `main.py`:
 
 ```python
-MAX_SLICE_DEPTH_CM = 0.3          # Maximum thickness of each slice (cm)
-MINIMUM_CONTOUR_SIZE = 1           # Minimum size of contours to include (cm)
-SCALE_FACTOR = 0.5                 # Scale factor for the model
 A4_W, A4_H = 2646, 3742           # A4 dimensions at 320 PPI
-REQUESTED_PPI = 320                # Output resolution (pixels per inch)
-
-SAVE_NPZ = False                   # Save slices in NPZ format
-SAVE_JSON = False                  # Save slices in JSON format
-DEBUG = True                        # Enable debug output
-DEBUG_PLOT = False                 # Show detailed matplotlib preview
-MAKE_SVG = True                    # Generate SVG files
+REQUESTED_PPI = 320               # Output resolution (pixels per inch)
+SAVE_NPZ = False                  # Save contours in NPZ format 
+DEBUG = False                     # print debug info
+DEBUG_PLOT = False                # plot raw slices
+MAKE_SVG = True                   # create SVGs
+ADD_SPINE_TO_PLOT = False         # plot 3d spine 
+ADD_SPINE_CUT_TO_PLOT = True      # plot 2d spine
+ADD_SLICES_TO_PLOT = False        # plot 3d slices
+MINIMUM_CONTOUR_SIZE = 0.5        # cm, minimum side of the bounding box
 ```
 
 ### Supported 3D Formats
 
-The tool automatically detects and loads:
+The tool should detects and loads:
 - `.stl` - Stereolithography
-- `.obj` - Wavefront OBJ
-- `.ply` - Polygon File Format
-- `.glb` - GL Transmission Format (Binary)
-- `.gltf` - GL Transmission Format
-- `.mtl` - Material files (automatically finds corresponding geometry file)
 
 ## Output
 
@@ -92,7 +84,6 @@ The script generates:
 
 Optional outputs (when enabled):
 - **slices_points.npz**: Compressed NumPy array format
-- **slices_points.json**: JSON format for web applications
 
 ## How It Works
 
@@ -101,37 +92,23 @@ Optional outputs (when enabled):
 3. **Contour extraction**: Each intersection is converted to 2D contours
 4. **Filtering**: Small contours below the minimum size are removed
 5. **Pixel conversion**: Contours are converted from cm to pixels for printing
-6. **Packing**: An intelligent algorithm arranges contours on A4 pages, minimizing waste
+6. **Packing**: An algorithm arranges contours on A4 pages, minimizing waste
 7. **SVG generation**: Each page is rendered as an SVG file with numbered pieces
 
 ## Building Standalone Applications
 
-To create standalone executables for distribution:
-
-### Windows
-```bash
-pyinstaller --onefile --noconsole --icon=sliceform_puzzle_icon.ico --name "SliceformPuzzleMaker" main.py
-```
-
-### macOS
-```bash
-pyinstaller --windowed --icon=sliceform_puzzle_icon.icns --name "SliceformPuzzleMaker" main.py
-```
-
+To create standalone executables for distribution, read "Pyinstaller instructions.txt"
 The executable will be created in the `dist/` directory.
 
 ## Tips for Best Results
 
 - **Model orientation**: Ensure your model's Z-axis points upward before processing
-- **Model scale**: Check your model's units (mm, cm, m) and adjust `unit_in` parameter accordingly
+- **Model scale**: Check your model's units (mm, cm, m) and adjust `SCALE FACTOR` parameter accordingly
 - **Slice thickness**: Smaller slices (0.3 cm) give more detail but require more pieces
 - **Material**: Use thin cardboard, plastic sheets, or wood veneer for best results
 - **Assembly**: Pieces can be interlocked by cutting slots where they intersect
 
 ## Troubleshooting
-
-**Issue**: "File .mtl fornito, ma non ho trovato file geometria"
-- **Solution**: Ensure the .obj, .stl, or other geometry file has the same name as the .mtl file
 
 **Issue**: Model appears upside down or rotated
 - **Solution**: Adjust the `up_axis` parameter (default: 'Z')
@@ -150,14 +127,6 @@ Marco Mezzana
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Future Enhancements
-
-- [ ] GUI interface for easier configuration
-- [ ] Support for more 3D file formats
-- [ ] Automatic interlocking slot generation
-- [ ] Assembly instructions generation
-- [ ] Real-time preview during slicing
 
 ## Related Resources
 

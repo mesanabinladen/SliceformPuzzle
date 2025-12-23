@@ -1,59 +1,72 @@
 import numpy as np
 import trimesh
 from pathlib import Path
-import json
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection 
 import math
-from shapely.geometry import MultiPoint, Polygon, LineString, box
+from shapely.geometry import Polygon, LineString, box
 from shapely.ops import unary_union
+import os, sys, platform
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 # CONSTANTS
-# A4 dimensions in pixels at 320 PPI
-A4_W, A4_H = 2646, 3742  # A4 dimensions at 320 PPI
-REQUESTED_PPI = 320  # pixels per inch for the SVG
-SAVE_NPZ = False
-SAVE_JSON = False
-DEBUG = True
-DEBUG_PLOT = False
-MAKE_SVG = True
-ADD_SPINE_TO_PLOT = False
-ADD_SLICES_TO_PLOT = False
-MINIMUM_CONTOUR_SIZE = 1 # cm, minimum side of the bounding box
+A4_W, A4_H = 2646, 3742           # A4 dimensions at 320 PPI
+REQUESTED_PPI = 320               # Output resolution (pixels per inch)
+SAVE_NPZ = False                  # Save contours in NPZ format 
+DEBUG = False                     # print debug info
+DEBUG_PLOT = False                # plot raw slices
+MAKE_SVG = True                   # create SVGs
+ADD_SPINE_TO_PLOT = False         # plot 3d spine 
+ADD_SPINE_CUT_TO_PLOT = True      # plot 2d spine
+ADD_SLICES_TO_PLOT = False        # plot 3d slices
+MINIMUM_CONTOUR_SIZE = 0.5        # cm, minimum side of the bounding box
 
-# PARAMETERS - TO BE EXPOSED TO THE USER
-SLICE_HEIGHT_CM = 0.4 # maximum height of each sheet slice in cm
+# PARAMETERS EXPOSED TO THE USER
+STL_MODEL_FILE_NAME = "Alpino.stl"
+SLICE_HEIGHT_CM = 1.0 # maximum height of each sheet slice in cm
 AIR_GAP_CM = 0.2        # gap between slices in cm
 # scale factor to enlarge the model during slicing.
 # theoretically a factor of 10 yields a ~25 cm tall model, so contours will be expressed in cm.
 SCALE_FACTOR = 0.5 # for stl 0.05 (model ~400mm), for .obj 10
 
-def centroid(contour):
+def contour_centroid(contour):
     return np.mean(contour, axis=0)
 
-def compute_base_spine(slices, tolerance_deg=10):
-    angles = []
-    for i, sl in enumerate(slices):
-        if len(sl) == 2:
-            c1 = centroid(sl[0])
-            c2 = centroid(sl[1])
-            dx, dy = c2 - c1
-            angle = math.degrees(math.atan2(dy, dx))
-            angles.append(angle)
-    if not angles:
-        # no slices with two contours found
-        angles = [0.0]  # default to 0 degrees, any angle is valid!
-
+def compute_base_spine(slices):
+    
+    #  I check intersection of contours of every slice with each other. After, I calculate the centroids of the intersection figure 
+    try:
+        intersections = None
+        for sl in slices:
+            # if there are more contours, I create a multi polygon
+            if len(sl) < 2:
+                continue    
+            elif len(sl) == 2:
+                polys = [Polygon(c) for c in sl]
+                poly = unary_union(polys)
+            if intersections is None:
+                intersections = poly
+                continue
+            else:
+                intersections = intersections.intersection(poly)
+            if intersections.is_empty:
+                raise ValueError("No intersection between slices found; cannot compute spine direction.")
+    except Exception as e:
+        raise ValueError(f"Error computing intersections: {e}")
+     
+    angle = 0
+    if len(intersections.geoms) == 2:
+        c1 = contour_centroid(intersections.geoms[0].exterior.coords)
+        c2 = contour_centroid(intersections.geoms[1].exterior.coords)
+        dx, dy = c2 - c1
+        angle = math.degrees(math.atan2(dy, dx))
+  
     # normalizes angles to [0,180)
-    norm_angles = [a % 180 for a in angles]
+    norm_angles = angle % 180
     avg_angle = np.mean(norm_angles)
     avg_angle_rad = math.radians(avg_angle)
-
-    # check coherence
-    for a in norm_angles:
-        if abs(a - avg_angle) > tolerance_deg:
-            raise ValueError(f"Incoherent angles: {norm_angles}")
-    
+  
     # define the spine imaginary line
     dx, dy = math.cos(avg_angle_rad), math.sin(avg_angle_rad)
 
@@ -328,6 +341,8 @@ def bounding_box_area(contour):
     return (xmax - xmin) * (ymax - ymin)
 
 def make_svgs(contours):
+    global base_dir
+
     # sort from largest to smallest
     contours_sorted = sorted(
         contours,
@@ -365,7 +380,7 @@ def make_svgs(contours):
         svgs.append("\n".join(svg_parts))
 
     for i, svg in enumerate(svgs, start=1):
-        with open(f"output_page_{i}.svg", "w") as f:
+        with open(f"{base_dir}\\output_page_{i}.svg", "w") as f:
             f.write(svg)
 
 
@@ -386,8 +401,7 @@ def add_contour_to_plot(contour, z_bottom, z_top, face_color="cyan"):
     verts_bottom = [(float(pt[0]), float(pt[1]), z_bottom) for pt in base_pts]
     verts_top = [(float(pt[0]), float(pt[1]), z_top) for pt in base_pts]
 
-    # appendo tutte le tuple (z,x) alla lista del profilo della spina, prendendoli da verts_bottom e verts_top a patto che y sia >=0
-
+    # append all tuples (z,x) to the spine profile list, taking them from verts_bottom and verts_top provided that y >=0
     n = len(base_pts)
     faces = []
     for i in range(n):
@@ -434,23 +448,23 @@ def clip_polygon_x_shapely(geom: Polygon, keep_pct: float = 0.50, anchor: str = 
     if geom.is_empty:
         return geom
 
-    # Bounds della geometria
+    # geometry bounds
     minx, miny, maxx, maxy = geom.bounds
     width = maxx - minx
     if width <= 0.0:
-        # Nessuna larghezza in X: ritorna com'è
+        # no width
         return geom
 
     if anchor == 'left':
-        # Mantieni la parte sinistra: x ∈ [minx, minx + keep_pct * width]
+        # Mantain left part: x ∈ [minx, minx + keep_pct * width]
         x_clip = minx + keep_pct * width
         clipper = box(minx, miny, x_clip, maxy)
     else:  # anchor == 'right'
-        # Mantieni la parte destra: x ∈ [maxx - keep_pct * width, maxx]
+        # Mantain right part: x ∈ [maxx - keep_pct * width, maxx]
         x_clip = maxx - keep_pct * width
         clipper = box(x_clip, miny, maxx, maxy)
 
-    # Intersezione
+    # Intersection
     return geom.intersection(clipper)
 
 def add_face_to_spine_contour(line_bottom, z_bottom, z_top):
@@ -484,13 +498,12 @@ def compute_spine_intersections(slices, spine):
 
     spine_poly = Polygon(spine)
     z = 0.0
-    for i in range(len(slices) - 1): 
-        sl_contours = slices[i]
+    for i, sl_contours in enumerate(slices[:-1]): # skip last slice
         if len(sl_contours) > 0:
             # slice con più contour
-            contours = [Polygon(c) for c in sl_contours]   # list of shapely polygons
+            poly_contours = [Polygon(c) for c in sl_contours]   # list of shapely polygons
     
-            slice_poly = unary_union(contours)    # union of all polygons in the slice
+            slice_poly = unary_union(poly_contours)    # union of all polygons in the slice
             inter = spine_poly.intersection(slice_poly)
             
             if not inter.is_empty:
@@ -526,15 +539,22 @@ def compute_spine_intersections(slices, spine):
                         # remove 30% in negative X direction
                         cutted_poly = clip_polygon_x_shapely(poly, keep_pct=0.6, anchor='right')
 
-                    bottom = [(x, y, z) for x, y in poly.exterior.coords] # questo è un contour!
-                    bottoms.append(np.array(bottom))
-                    top    = [(x, y, z + SLICE_HEIGHT_CM) for x, y in poly.exterior.coords]
-                    tops.append(np.array(top))
-                    
                     # Y an Z points are to be added to the spine final.shape...
                     cutted_bottom = [(x, y, z) for x, y in cutted_poly.exterior.coords] # questo è un contour!
                     
-                    # aggiorno anche il contour nella slice, rimuovendo la parte di intersezione con cutted_poly
+                    # if AIR_GAP_CM > 0.0, the bottom is the original polygon at z, the top is original polygon at z+SLICE_HEIGHT_CM
+                    # else, the bottom is the cutted polygon at z, the top is the cutted polygon at z+SLICE_HEIGHT_CM
+                    if AIR_GAP_CM > 0.0:
+                        bottom = [(x, y, z) for x, y in poly.exterior.coords] # questo è un contour!
+                        top    = [(x, y, z + SLICE_HEIGHT_CM) for x, y in poly.exterior.coords]
+                    else:
+                        bottom = cutted_bottom
+                        top    = [(x, y, z + SLICE_HEIGHT_CM) for x, y in cutted_poly.exterior.coords]
+
+                    bottoms.append(np.array(bottom))
+                    tops.append(np.array(top))
+                    
+                    # we'll update the slice contour, removing the part intersecting with cutted_poly
                     cutted_slice = Polygon(contour).difference(cutted_poly)
                     if cutted_slice.geom_type == "MultiPolygon":
                         if DEBUG:
@@ -583,7 +603,7 @@ def compute_spine_intersections(slices, spine):
 
         bottoms_current = sl_current[-2]  # last but one element
         tops_next = sl_next[-1]           # last element
-
+        
         for bottom in bottoms_current:
             poly_bottom = Polygon(bottom[:, :2])  # XY only
             for top in tops_next:
@@ -612,14 +632,9 @@ def compute_spine_intersections(slices, spine):
                 add_contour_to_plot(extrusion, z_bottom, z_top, face_color='orange')
 
 def add_slices_to_plot(slices, spacing_cm = SLICE_HEIGHT_CM + AIR_GAP_CM, thickness_cm = SLICE_HEIGHT_CM, max_contour_length=2):
-    global slices_plot
-
     for slice_idx, sl in enumerate(slices):
         # loop excluding the last 2 contours (spine)
         sl = sl[:-2]
-
-        if len(sl) < max_contour_length:
-            continue  # need at least 2 contours to extrude TO BE REMOVED
 
         z_bottom = slice_idx * spacing_cm
         z_top = z_bottom + thickness_cm
@@ -630,15 +645,83 @@ def add_slices_to_plot(slices, spacing_cm = SLICE_HEIGHT_CM + AIR_GAP_CM, thickn
             
             add_contour_to_plot(contour, z_bottom, z_top)
 
-if __name__ == "__main__":
-    # first, delete any existing SVG files from the working directory
-    existing_svgs = list(Path('.').glob('output_page_*.svg'))
-    for svg_file in existing_svgs:
-        svg_file.unlink()
-    
-    model = Path("Alpino.stl")
+def filter_slices(slices):
+    for i, sl in enumerate(slices):
+        # rebuild the list filtering out too-small contours
+        # and exclude also contours with less than 3 points
+        tmp_sl = []
+        for contour in sl:
+            if not any(dim < MINIMUM_CONTOUR_SIZE for dim in bounding_box_size(contour)) and len(contour) > 3:
+                tmp_sl.append(contour)
 
-    slices = slices_points_from_stl(str(model), unit_in='mm', up_axis='Z')
+        slices[i] = tmp_sl
+
+    # remove also contours from the third one
+    for i, sl in enumerate(slices):
+        if len(sl) > 2:
+            sl[:] = sl[2:]
+            print(f"WARNING Removed first two contours from slice {i}; now has {len(sl)} contours.")
+
+    # now for every slice with 2 contours, check is one contour is inside the other; if so, remove the inner one
+    for i, sl in enumerate(slices):
+        if len(sl) == 2:
+            poly1 = Polygon(sl[0])
+            poly2 = Polygon(sl[1])
+            if poly1.within(poly2):
+                sl.pop(0)
+                print(f"INFO: Slice {i} contour 0 is within contour 1; removed inner contour.")
+            elif poly2.within(poly1):
+                sl.pop(1)
+                print(f"INFO: Slice {i} contour 1 is within contour 0; removed inner contour.")
+
+def configure_plot(plot, title="NO_TITLE"):
+    plot.set_title(title)
+    plot.set_xlabel('X (cm)')
+    plot.set_ylabel('Y (cm)')
+    plot.set_zlabel('Z (cm)')
+
+    # prepare plot plotting and adjusting limits
+    limits = np.r_[plot.get_xlim3d(), plot.get_ylim3d(), plot.get_zlim3d()]
+    limits_x = [min(limits[0], limits[1]), max(limits[0], limits[1])]
+    limits_y = [min(limits[2], limits[3]), max(limits[2], limits[3])]
+    limits_z = [min(limits[4], limits[5]), max(limits[4], limits[5])]
+
+    # calculate ranges
+    rx = limits_x[1] - limits_x[0] 
+    ry = limits_y[1] - limits_y[0] 
+    rz = limits_z[1] - limits_z[0] 
+    
+    # normalize aspect ratio
+    max_range = max(rx, ry, rz) 
+    aspect = (rx/max_range, ry/max_range, rz/max_range) 
+    plot.set( xlim3d=limits_x, ylim3d=limits_y, zlim3d=limits_z, box_aspect=aspect )
+
+    # view from the side, along Y axis with X to the right and Z up
+    plot.view_init(elev=0, azim=-90) 
+    
+    # orthographic projection
+    plot.set_proj_type('ortho')
+
+def get_base_dir():
+    if getattr(sys, 'frozen', False):
+        exe_path = os.path.abspath(sys.executable)
+        if platform.system() == "Darwin":  # macOS
+            # .../PuzzleMaker.app/Contents/MacOS → .../dist
+            macos_dir = os.path.dirname(exe_path)         # .../Contents/MacOS
+            contents_dir = os.path.dirname(macos_dir)     # .../Contents
+            app_root = os.path.dirname(contents_dir)      # .../PuzzleMaker.app
+            ext_dir = os.path.dirname(app_root)          # .../dist
+            return ext_dir
+        else:  # Windows (o Linux con --onefile)
+            return os.path.dirname(exe_path)
+    else:
+        # in sviluppo: usa la cartella corrente
+        return os.getcwd()
+
+def load_model(model_path):
+    global full_spine_face_zx, slices_plot, base_dir
+
+    slices = slices_points_from_stl(str(model_path), unit_in='mm', up_axis='Z')
     # save as compressed npz (optional) — force object dtype to store nested heterogeneous lists
     
     if DEBUG:
@@ -647,85 +730,58 @@ if __name__ == "__main__":
         for i, sl in enumerate(slices):
             print(f" Slice {i}: {len(sl)} contour")  
 
-    for i, sl in enumerate(slices):
-        if len(sl) > 2:
-            slices[i] = []
-            continue
-        # rebuild the list filtering out too-small contours
-        slices[i] = [
-            contour for contour in sl
-            if not any(dim < MINIMUM_CONTOUR_SIZE for dim in bounding_box_size(contour))
-        ]
+    is_plot_needed = DEBUG_PLOT or ADD_SLICES_TO_PLOT or ADD_SPINE_TO_PLOT or ADD_SPINE_CUT_TO_PLOT
+
+    if is_plot_needed:
+        # prepare matplotlib 3D plot
+        fig = plt.figure()
+        
+        if DEBUG_PLOT:
+            # create a matplotlib 3D view to verify raw slicing results
+            points_plot = fig.add_subplot(1,2,1, projection='3d')
+            # plot points on the left subplot
+            for slice_idx, sl in enumerate(slices):
+                z = slice_idx * (SLICE_HEIGHT_CM + AIR_GAP_CM)  
+                for contour in sl:
+                    xs = [pt[0] for pt in contour]
+                    ys = [pt[1] for pt in contour]
+                    zs = [z] * len(contour)
+                    points_plot.plot(xs, ys, zs, marker='o', linestyle='None', markersize=2)
+            
+            configure_plot(points_plot, title ="Raw slices points")
+
+            slices_plot = fig.add_subplot(1,2,2, projection='3d')
+        else:
+            slices_plot = fig.add_subplot(projection='3d')
+
+    filter_slices(slices)   
 
     # compute spine, if possible, rotate slices and prepare the intersection slot in each slice
     try:
         spine = compute_base_spine(slices)
+    
+        # compute intersections between spine and each slice
+
+        compute_spine_intersections(slices, spine)
+        
+        if ADD_SPINE_CUT_TO_PLOT:
+            for face in full_spine_face_zx:
+                zs = [pt[0] for pt in face]
+                xs = [pt[1] for pt in face]
+                ys = [0.0] * len(face)  # spine lies on Y=0
+                slices_plot.plot(xs, ys, zs, marker='o', linestyle='-', color='blue', markersize=2)
+
+        merged = unary_union([Polygon(face) for face in full_spine_face_zx])
+        if merged.geom_type == "MultiPolygon":    
+            print("WARNING: spine face is MultiPolygon! Something went wrong.")
+            exit(1)
+
     except ValueError as e:
         print("Error calculating spine:", e)
-        exit(1)
-
-    # prepare matplotlib 3D plot
-    fig = plt.figure()
-    if DEBUG_PLOT:
-        # create a matplotlib 3D view to verify raw slicing results
-        points_plot = fig.add_subplot(1,2,1, projection='3d')
-        # plot points on the left subplot
-        for slice_idx, sl in enumerate(slices):
-            z = slice_idx * (SLICE_HEIGHT_CM + AIR_GAP_CM)  
-            for contour in sl:
-                xs = [pt[0] for pt in contour]
-                ys = [pt[1] for pt in contour]
-                zs = [z] * len(contour)
-                points_plot.plot(xs, ys, zs, marker='o', linestyle='None', markersize=2)
-        points_plot.set_title("Slice points")
-        points_plot.set_xlabel('X (cm)')
-        points_plot.set_ylabel('Y (cm)')
-        points_plot.set_zlabel('Z (cm)')
-        print("Points visualization completed.")
-        slices_plot = fig.add_subplot(1,2,2, projection='3d')
-    else:
-        slices_plot = fig.add_subplot(projection='3d')
-
-    slices_plot.set_title("Extruded slices")
-    slices_plot.set_xlabel('X (cm)')
-    slices_plot.set_ylabel('Y (cm)')
-    slices_plot.set_zlabel('Z (cm)')
-
-    # compute intersections between spine and each slice
-
-    full_spine_face_zx = [] # lista di punti sul piano zx da cui ricavare il profilo della spina
-
-    compute_spine_intersections(slices, spine)
-    
-    merged = unary_union([Polygon(face) for face in full_spine_face_zx])
-    if merged.geom_type == "Polygon":
-        merged_faces = [merged]
-    elif merged.geom_type == "MultiPolygon":    
-        merged_faces = list(merged.geoms)
-    else:
-        merged_faces = []
-
-    merged_contour = [(x, z) for x, z in merged.exterior.coords] # questo è un contour!
-
-    if ADD_SPINE_TO_PLOT:
-        for face in full_spine_face_zx:
-            zs = [pt[0] for pt in face]
-            xs = [pt[1] for pt in face]
-            ys = [0.0] * len(face)  # spine lies on Y=0
-            slices_plot.plot(xs, ys, zs, marker='o', linestyle='-', color='blue', markersize=2)
-    
+             
     if SAVE_NPZ:
         slices_arr = np.asarray(slices, dtype=object)
-        np.savez_compressed("slices_points.npz", slices=slices_arr)
-
-    if SAVE_JSON:
-        # also save as JSON (converting tuples -> lists)
-        slices_json = [
-            [ [ [float(x), float(y)] for (x, y) in contour ] for contour in sl ]
-            for sl in slices
-        ]
-        with open("slices_points.json", "w", encoding="utf-8") as f:
-            json.dump({"slices": slices_json}, f, ensure_ascii=False, indent=2)
+        np.savez_compressed(f"{base_dir}\\slices_points.npz", slices=slices_arr)
 
     if MAKE_SVG:
         # gather all slices contours into a single list to generate the SVG. Since we must express them in pixels, convert cm to pixels
@@ -735,21 +791,87 @@ if __name__ == "__main__":
             for contour_index, contour in enumerate(sl):
                 all_contours.append((f"{sl_index}-{contour_index}", np.array(contour_to_pixels(contour)))) 
         
-        all_contours.append(("spine", np.array(contour_to_pixels(merged_contour))))
+        merged_contour = [(x, z) for x, z in merged.exterior.coords] # questo è un contour!
+        all_contours.append(("", np.array(contour_to_pixels(merged_contour))))
         
         make_svgs(all_contours)
-   
 
-    # prepare plot plotting and adjusting limits
-    limits = np.r_[slices_plot.get_xlim3d(), slices_plot.get_ylim3d(), slices_plot.get_zlim3d()]
-    limits = [np.min(limits, axis=0), np.max(limits, axis=0)]
+    if is_plot_needed:
+        configure_plot(slices_plot, title ="Extruded slices")
+        plt.show(block=True)
+
+    messagebox.showinfo("Saved", f"SVGs saved")   
+
+def open_stl():
+    global SLICE_HEIGHT_CM, AIR_GAP_CM, SCALE_FACTOR
+
+    SLICE_HEIGHT_CM = float(entry_slice_height.get())
+    AIR_GAP_CM = float(entry_air_gap.get())
+    SCALE_FACTOR = float(entry_scale_factor.get())
     
-    # Metti il piano X–Z di fronte: Y perpendicolare allo schermo
-    slices_plot.view_init(elev=0, azim=-90)    # prova anche azim=-90 se preferisci invertire destra/sinistra
-
-    # Proiezione ortografica (niente prospettiva/isometria)
-    slices_plot.set_proj_type('ortho')
-
-    slices_plot.set(xlim3d=limits, ylim3d=limits, zlim3d=limits, box_aspect=(1, 1, 1))
+    if SLICE_HEIGHT_CM <= 0.0:
+        messagebox.showerror("Error", "Slice height must be > 0 cm")
+        return
+    if AIR_GAP_CM <= 0.0:
+        messagebox.showerror("Error", "Air gap must be >= 0 cm")
+        return
+    if SCALE_FACTOR <= 0.0:
+        messagebox.showerror("Error", "Scale factor must be > 0")
+        return
     
-    plt.show(block=True)
+    # on macOS, there is no file type filter, so I exclude it otherwise tkinter crashes
+    filetypes = "" if sys.platform == "darwin" else [("STL Files", "*.stl;*.STL"), ("All Files", "*.*")]
+
+    path = filedialog.askopenfilename(
+        title="Choose an STL file",
+        filetypes=filetypes
+    )
+    if not path:
+        return
+    try:
+        load_model(path)
+    except Exception as e:
+        messagebox.showerror("Error", f"Impossible to open:\n{e}")
+        return
+
+# list of globals
+full_spine_face_zx = [] # list of contours representing the full spine face in Z-X plane
+slices_plot = None
+base_dir = get_base_dir()
+
+# first, delete any existing SVG files from the working directory
+existing_svgs = list(Path(base_dir).glob('output_page_*.svg'))
+for svg_file in existing_svgs:
+    svg_file.unlink()
+
+root = tk.Tk()
+root.title("Sliceform Puzzle Maker")
+root.resizable(False, False)
+
+# Main control frame
+ctrl_frame = tk.Frame(root)
+ctrl_frame.pack(padx=10, pady=10, anchor='w')
+
+# Controls
+btn = tk.Button(ctrl_frame, text="Open STL...", command=open_stl)
+btn.grid(row=0, column=0, padx=(0, 8), pady=4)
+
+tk.Label(ctrl_frame, text="Slice height (cm):").grid(row=0, column=1, sticky='e')
+entry_slice_height = tk.Entry(ctrl_frame, width=5)
+entry_slice_height.insert(0, "0.3")
+entry_slice_height.grid(row=0, column=2, padx=(4, 12))
+
+tk.Label(ctrl_frame, text="Air gap (cm):").grid(row=0, column=3, sticky='e')
+entry_air_gap = tk.Entry(ctrl_frame, width=5)
+entry_air_gap.insert(0, "0.3")
+entry_air_gap.grid(row=0, column=4, padx=(4, 12))
+
+tk.Label(ctrl_frame, text="Scale Factor:").grid(row=0, column=5, sticky='e')
+entry_scale_factor = tk.Entry(ctrl_frame, width=6)
+entry_scale_factor.insert(0, "0.5")
+entry_scale_factor.grid(row=0, column=6, padx=(4, 12))
+
+root.mainloop()
+
+
+
